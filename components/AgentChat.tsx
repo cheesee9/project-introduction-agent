@@ -2,7 +2,7 @@
 
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport } from 'ai'
-import { useEffect, useRef, useState } from 'react'
+import { useActionState, useEffect, useRef, useState } from 'react'
 import { ArrowUp, ArrowUpRight, LoaderCircle, RotateCcw, Square, MessageCircle, AlertCircle } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -27,23 +27,30 @@ export default function AgentChat({ configured }: { configured: boolean }) {
   const conversation = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const followLatest = useRef(true)
-  const busy = status === 'submitted' || status === 'streaming'
+  const generating = status === 'submitted' || status === 'streaming'
+  const [, submitAction, isSubmitting] = useActionState(
+    async (_previousState: null, formData: FormData) => {
+      const value = formData.get('suggestedQuestion') ?? formData.get('question')
+      const question = typeof value === 'string' ? value.trim() : ''
+      if (!configured || generating || !question || question.length > MAX_INPUT_LENGTH) return null
+
+      clearError()
+      setStopped(false)
+      followLatest.current = true
+      setInput('')
+      // 等待本轮流式请求结束，让 Action 的 pending 状态覆盖整个提交过程。
+      await sendMessage({ text: question })
+      return null
+    },
+    null
+  )
+  const busy = isSubmitting || generating
 
   useEffect(() => {
     if (followLatest.current && conversation.current) {
       conversation.current.scrollTop = messages.length ? conversation.current.scrollHeight : 0
     }
   }, [messages, status])
-
-  function submit(text: string) {
-    const question = text.trim()
-    if (!configured || busy || !question || question.length > MAX_INPUT_LENGTH) return
-    clearError()
-    setStopped(false)
-    followLatest.current = true
-    void sendMessage({ text: question })
-    setInput('')
-  }
 
   function reset() {
     setMessages([])
@@ -113,10 +120,12 @@ export default function AgentChat({ configured }: { configured: boolean }) {
                 {projectQuestions.map((question) => (
                   <Button
                     key={question}
-                    type="button"
+                    type="submit"
+                    form="agent-chat-form"
+                    name="suggestedQuestion"
+                    value={question}
                     variant="outline"
                     disabled={!configured || busy}
-                    onClick={() => submit(question)}
                     className="h-auto max-w-full justify-between gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-normal whitespace-normal"
                   >
                     {question}
@@ -167,20 +176,21 @@ export default function AgentChat({ configured }: { configured: boolean }) {
               </AlertDescription>
             </Alert>
           )}
-          {stopped && !error && (
+          {stopped && !error && !busy && (
             <p role="status" className="mb-3 text-xs text-muted-foreground">已停止生成，当前回复可能不完整。你可以继续提问。</p>
           )}
-          <form onSubmit={(event) => { event.preventDefault(); submit(input) }}>
+          <form id="agent-chat-form" action={submitAction}>
             <label htmlFor="agent-question" className="sr-only">你的问题</label>
             <Textarea
               ref={inputRef}
               id="agent-question"
+              name="question"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.nativeEvent.isComposing) {
                   event.preventDefault()
-                  submit(input)
+                  if (!busy && configured) event.currentTarget.form?.requestSubmit()
                 }
               }}
               disabled={!configured || busy}
